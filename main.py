@@ -119,8 +119,9 @@ class AddEditShortcutWindow(QDialog):
         layout.addWidget(QLabel("📌 软件名称", font=FONT_TITLE))
         layout.addWidget(self.soft_name_edit)
 
-        layout.addWidget(QLabel("📌 操作 & 快捷键（可添加/删除多条）", font=FONT_TITLE))
+        layout.addWidget(QLabel("📌 操作 & 快捷键（可添加/删除/编辑多条）", font=FONT_TITLE))
         layout.addWidget(QLabel("格式示例：复制 → Ctrl+C", font=FONT_SMALL, styleSheet="color:#666666;"))
+        layout.addWidget(QLabel("双击列表项可编辑", font=FONT_SMALL, styleSheet="color:#666666;"))
         
         self.oper_edit = QLineEdit()
         self.oper_edit.setPlaceholderText("输入操作（例：全选）")
@@ -130,11 +131,17 @@ class AddEditShortcutWindow(QDialog):
         self.key_edit.setPlaceholderText("输入快捷键（例：Ctrl+A）")
         layout.addWidget(self.key_edit)
 
-        # 添加+删除按钮 横向布局
+        # 添加+删除+更新按钮 横向布局
         btn_layout = QHBoxLayout()
         add_btn = QPushButton("➕ 添加该行快捷键")
         add_btn.clicked.connect(self.add_one_shortcut)
         btn_layout.addWidget(add_btn)
+
+        self.update_btn = QPushButton("🔄 更新该行快捷键")
+        self.update_btn.setStyleSheet("background:#F59E0B;color:white;")
+        self.update_btn.clicked.connect(self.update_one_shortcut)
+        self.update_btn.setEnabled(False)
+        btn_layout.addWidget(self.update_btn)
 
         del_btn = QPushButton("🗑️ 删除选中行")
         del_btn.setStyleSheet("background:#EF4444;color:white;")
@@ -143,6 +150,7 @@ class AddEditShortcutWindow(QDialog):
         layout.addLayout(btn_layout)
 
         self.shortcut_list = QListWidget()
+        self.shortcut_list.itemDoubleClicked.connect(self.edit_one_shortcut)
         layout.addWidget(self.shortcut_list)
 
         btn_text = "✅ 确认修改并保存" if self.edit_soft_name else "✅ 确认添加该软件"
@@ -150,6 +158,9 @@ class AddEditShortcutWindow(QDialog):
         save_btn.setStyleSheet("background:#27AE60;color:white;border-radius:6px;padding:6px;")
         save_btn.clicked.connect(self.save_all)
         layout.addWidget(save_btn)
+
+        # 记录当前编辑的行索引
+        self.editing_index = -1
 
     def add_one_shortcut(self):
         oper = self.oper_edit.text().strip()
@@ -161,6 +172,46 @@ class AddEditShortcutWindow(QDialog):
         self.shortcut_list.addItem(f"{oper} → {key}")
         self.oper_edit.clear()
         self.key_edit.clear()
+        # 重置编辑状态
+        self.editing_index = -1
+        self.update_btn.setEnabled(False)
+
+    def edit_one_shortcut(self, item):
+        # 获取当前选中项的索引
+        self.editing_index = self.shortcut_list.row(item)
+        if self.editing_index == -1:
+            return
+        
+        # 解析当前项的内容
+        current_text = item.text()
+        if " → " in current_text:
+            oper, key = current_text.split(" → ", 1)
+            self.oper_edit.setText(oper.strip())
+            self.key_edit.setText(key.strip())
+            # 启用更新按钮，禁用添加按钮
+            self.update_btn.setEnabled(True)
+
+    def update_one_shortcut(self):
+        if self.editing_index == -1:
+            return
+        
+        oper = self.oper_edit.text().strip()
+        key = self.key_edit.text().strip()
+        if not oper or not key:
+            QMessageBox.warning(self, "提示", "操作名称和快捷键都不能为空！")
+            return
+        
+        # 更新数据和列表项
+        self.shortcut_temp[self.editing_index] = {"操作": oper, "快捷键": key}
+        self.shortcut_list.item(self.editing_index).setText(f"{oper} → {key}")
+        
+        # 清空输入框，重置编辑状态
+        self.oper_edit.clear()
+        self.key_edit.clear()
+        self.editing_index = -1
+        self.update_btn.setEnabled(False)
+        
+        QMessageBox.information(self, "成功", "已更新选中的快捷键！")
 
     def del_one_shortcut(self):
         current_item = self.shortcut_list.currentItem()
@@ -170,6 +221,15 @@ class AddEditShortcutWindow(QDialog):
         row = self.shortcut_list.currentRow()
         self.shortcut_list.takeItem(row)
         del self.shortcut_temp[row]
+        # 如果删除的是正在编辑的行，重置编辑状态
+        if self.editing_index == row:
+            self.editing_index = -1
+            self.update_btn.setEnabled(False)
+            self.oper_edit.clear()
+            self.key_edit.clear()
+        elif self.editing_index > row:
+            # 如果删除的行在编辑行之前，调整编辑行索引
+            self.editing_index -= 1
         QMessageBox.information(self, "成功", "已删除选中的快捷键！")
 
     def save_all(self):
@@ -252,10 +312,23 @@ class ShortcutDetailWindow(QDialog):
         super().__init__(parent)
         self.soft_name = soft_name
         self.parent_win = parent
+        self.is_pressing = False
+        self.last_pos = QPoint(0,0)
         self.init_ui()
 
     def init_ui(self):
-        self.setFixedSize(FLOAT_WIN_WIDTH, FLOAT_WIN_HEIGHT)
+        # 获取快捷键列表
+        shortcut_list = DataManager.get_software_detail(self.soft_name)
+        
+        # 计算窗口宽度
+        width = 250  # 加宽窗口以更好地展示列表
+        
+        # 动态获取屏幕高度，设置最大高度为屏幕高度的80%
+        screen_height = QApplication.primaryScreen().geometry().height()
+        max_height = int(screen_height * 0.8)  # 最大高度为屏幕高度的80%
+        
+        self.setMinimumSize(width, 100)
+        self.setMaximumSize(width, max_height)  # 设置最大高度，避免超过屏幕
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
@@ -266,13 +339,14 @@ class ShortcutDetailWindow(QDialog):
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
-        layout.setContentsMargins(5,5,5,5)
+        layout.setContentsMargins(10,10,10,10)
 
         title_label = QLabel(f"📌 {self.soft_name}", font=FONT_TITLE)
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title_label.setStyleSheet("color:white;")
+        title_label.setStyleSheet("color:white;margin-bottom:5px;")
         layout.addWidget(title_label)
 
+        # 添加滚动区域，支持内容过多时滚动
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("border:none;")
@@ -280,10 +354,10 @@ class ShortcutDetailWindow(QDialog):
 
         content_widget = QWidget()
         content_layout = QVBoxLayout(content_widget)
-        content_layout.setSpacing(4)
+        content_layout.setSpacing(5)
+        content_layout.setContentsMargins(0,0,0,0)
         scroll.setWidget(content_widget)
 
-        shortcut_list = DataManager.get_software_detail(self.soft_name)
         if not shortcut_list:
             empty_label = QLabel("暂无快捷键数据", font=FONT_SMALL)
             empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -291,21 +365,127 @@ class ShortcutDetailWindow(QDialog):
             content_layout.addWidget(empty_label)
         else:
             for item in shortcut_list:
-                key_label = QLabel(f"{item['操作']}\n{item['快捷键']}", font=FONT_SMALL)
-                key_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                key_label.setStyleSheet("color:white;background:#334155;border-radius:5px;padding:3px;")
+                # 列表式展示：操作和快捷键在同一行，更紧凑
+                key_label = QLabel(f"{item['操作']} → {item['快捷键']}", font=FONT_SMALL)
+                key_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+                key_label.setStyleSheet("color:white;background:#334155;border-radius:5px;padding:5px 8px;")
                 content_layout.addWidget(key_label)
 
+        # 按钮布局：返回、新增和收起按钮
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+        btn_layout.setContentsMargins(0,0,0,0)
+        
         back_btn = QPushButton("← 返回", font=FONT_SMALL)
         back_btn.setStyleSheet("background:#0EA5E9;color:white;border-radius:5px;padding:4px;")
         back_btn.clicked.connect(self.back_to_main)
-        layout.addWidget(back_btn)
+        btn_layout.addWidget(back_btn)
+        
+        # 新增快捷键按钮
+        new_btn = QPushButton("➕ 新增", font=FONT_SMALL)
+        new_btn.setStyleSheet("background:#22C55E;color:white;border-radius:5px;padding:4px;")
+        new_btn.clicked.connect(self.new_shortcut)
+        btn_layout.addWidget(new_btn)
+        
+        collapse_btn = QPushButton("🔽 收起", font=FONT_SMALL)
+        collapse_btn.setStyleSheet("background:#8B5CF6;color:white;border-radius:5px;padding:4px;")
+        collapse_btn.clicked.connect(self.collapse_and_back)
+        btn_layout.addWidget(collapse_btn)
+        
+        layout.addLayout(btn_layout)
 
         self.move(self.parent_win.pos())
 
     def back_to_main(self):
         self.parent_win.show()
         self.accept()
+        
+    def collapse_and_back(self):
+        """收起主窗口并返回，确保在查看窗口位置收起"""
+        # 将主窗口位置设置为当前查看窗口的位置
+        self.parent_win.move(self.pos())
+        # 然后收起主窗口
+        self.parent_win.toggle_collapse()
+        self.parent_win.show()
+        self.accept()
+        
+    def new_shortcut(self):
+        """新增快捷键"""
+        # 获取当前软件的快捷键列表
+        shortcut_list = DataManager.get_software_detail(self.soft_name)
+        # 打开编辑窗口，传入当前软件名称和现有快捷键列表
+        edit_win = AddEditShortcutWindow(self.soft_name, shortcut_list, self)
+        # 如果编辑成功，刷新当前界面
+        if edit_win.exec():
+            self.refresh_ui()
+    
+    def refresh_ui(self):
+        """刷新快捷键界面"""
+        # 获取最新的快捷键列表
+        shortcut_list = DataManager.get_software_detail(self.soft_name)
+        
+        # 清空现有内容
+        content_widget = self.layout().itemAt(1).widget().widget()
+        content_layout = content_widget.layout()
+        # 清空所有现有控件
+        while content_layout.count() > 0:
+            item = content_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        
+        # 重新添加内容
+        if not shortcut_list:
+            empty_label = QLabel("暂无快捷键数据", font=FONT_SMALL)
+            empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty_label.setStyleSheet("color:#94A3B8;")
+            content_layout.addWidget(empty_label)
+        else:
+            for item in shortcut_list:
+                # 列表式展示：操作和快捷键在同一行，更紧凑
+                key_label = QLabel(f"{item['操作']} → {item['快捷键']}", font=FONT_SMALL)
+                key_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
+                key_label.setStyleSheet("color:white;background:#334155;border-radius:5px;padding:5px 8px;")
+                content_layout.addWidget(key_label)
+        
+    # 鼠标拖动悬浮窗 - 确保在所有状态下都能正常工作
+    def mousePressEvent(self, event):
+        # 确保所有状态下都能捕获鼠标按下事件
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.is_pressing = True
+            self.last_pos = event.pos()
+            # 阻止事件传递给子控件
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        # 确保所有状态下都能捕获鼠标移动事件
+        if self.is_pressing and event.buttons() == Qt.MouseButton.LeftButton:
+            # 计算新位置
+            new_pos = self.pos() + event.pos() - self.last_pos
+            self.move(new_pos)
+            # 阻止事件传递给子控件
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        # 确保所有状态下都能捕获鼠标释放事件
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.is_pressing = False
+            # 阻止事件传递给子控件
+            event.accept()
+    
+    # 确保子控件的鼠标事件不会干扰主窗口拖动
+    def eventFilter(self, obj, event):
+        if obj == self.collapse_btn:
+            if event.type() == event.Type.MouseButtonPress:
+                self.mousePressEvent(event)
+                return True
+            elif event.type() == event.Type.MouseMove:
+                self.mouseMoveEvent(event)
+                return True
+            elif event.type() == event.Type.MouseButtonRelease:
+                self.mouseReleaseEvent(event)
+                return True
+        return super().eventFilter(obj, event)
 
 # ===================== 核心：悬浮球主窗口【✅修复列表删空闪退BUG 核心修改】 =====================
 class FloatShortcutMain(QWidget):
@@ -314,11 +494,21 @@ class FloatShortcutMain(QWidget):
         self.app = app
         self.is_pressing = False
         self.last_pos = QPoint(0,0)
+        self.is_collapsed = False  # 收起状态标志
+        self.last_state = "main"  # 记录最后状态：main或detail
+        self.last_soft_name = None  # 记录最后查看的软件名称
         self.init_ui()
         self.load_software_list()
+        # 安装事件过滤器，确保按钮事件不影响拖动
+        self.collapse_btn.installEventFilter(self)
 
     def init_ui(self):
-        self.setFixedSize(QSize(FLOAT_WIN_WIDTH, FLOAT_WIN_HEIGHT))
+        # 初始展开状态的尺寸
+        if self.is_collapsed:
+            self.setFixedSize(30, 30)
+        else:
+            self.setFixedSize(QSize(FLOAT_WIN_WIDTH, FLOAT_WIN_HEIGHT))
+        
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
@@ -330,6 +520,12 @@ class FloatShortcutMain(QWidget):
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(5)
         main_layout.setContentsMargins(5,5,5,5)
+
+        # 收起/展开按钮
+        self.collapse_btn = QPushButton("🔽 收起")
+        self.collapse_btn.setStyleSheet("background:#8B5CF6;color:white;border-radius:5px;padding:3px;")
+        self.collapse_btn.clicked.connect(self.toggle_collapse)
+        main_layout.addWidget(self.collapse_btn)
 
         self.add_btn = QPushButton("➕ 添加软件", font=FONT_TITLE)
         self.add_btn.setStyleSheet("background:#F97316;color:white;border-radius:8px;padding:5px;")
@@ -360,6 +556,47 @@ class FloatShortcutMain(QWidget):
 
         self.move_to_right_edge()
         self.all_soft_list = DataManager.get_all_software()
+
+    def toggle_collapse(self):
+        """切换展开/收起状态"""
+        # 保存当前位置（左上角坐标）
+        current_pos = self.pos()
+        
+        self.is_collapsed = not self.is_collapsed
+        
+        if self.is_collapsed:
+            # 收起状态：缩小为圆形，直接使用当前位置
+            self.setFixedSize(30, 30)
+            self.setStyleSheet("background:#1E293B;border-radius:15px;")
+            
+            # 隐藏所有控件，只显示一个简单的指示器
+            self.add_btn.hide()
+            self.search_edit.hide()
+            self.exit_btn.hide()
+            self.scroll_area.hide()
+            self.collapse_btn.setText("⭕")
+            self.collapse_btn.setStyleSheet("background:#1E293B;color:white;border-radius:15px;padding:0;")
+            
+            # 直接使用当前位置，不做调整
+            self.move(current_pos)
+        else:
+            # 展开状态：恢复正常大小，直接使用当前位置
+            self.setFixedSize(QSize(FLOAT_WIN_WIDTH, FLOAT_WIN_HEIGHT))
+            self.setStyleSheet("background:#1E293B;border-radius:10px;")
+            
+            # 显示所有控件
+            self.add_btn.show()
+            self.search_edit.show()
+            self.exit_btn.show()
+            self.scroll_area.show()
+            self.collapse_btn.setText("🔽 收起")
+            self.collapse_btn.setStyleSheet("background:#8B5CF6;color:white;border-radius:5px;padding:3px;")
+            
+            # 重新加载软件列表，确保显示正确
+            self.load_software_list()
+            
+            # 直接使用当前位置，不做调整
+            self.move(current_pos)
 
     def move_to_right_edge(self):
         screen_geo = QApplication.primaryScreen().geometry()
@@ -415,6 +652,9 @@ class FloatShortcutMain(QWidget):
         if opt_win.exec():
             opt = opt_win.opt_result
             if opt == "view":
+                # 记录查看状态
+                self.last_state = "detail"
+                self.last_soft_name = soft_name
                 detail_win = ShortcutDetailWindow(soft_name, self)
                 detail_win.exec()
             elif opt == "edit":
@@ -434,19 +674,50 @@ class FloatShortcutMain(QWidget):
         if confirm == QMessageBox.StandardButton.Yes:
             self.app.quit()
 
-    # 鼠标拖动悬浮窗
+    # 鼠标拖动悬浮窗 - 确保在所有状态下都能正常工作
     def mousePressEvent(self, event):
+        # 确保所有状态下都能捕获鼠标按下事件
         if event.button() == Qt.MouseButton.LeftButton:
             self.is_pressing = True
             self.last_pos = event.pos()
+            # 阻止事件传递给子控件
+            event.accept()
 
     def mouseMoveEvent(self, event):
+        # 确保所有状态下都能捕获鼠标移动事件
         if self.is_pressing and event.buttons() == Qt.MouseButton.LeftButton:
-            self.move(self.pos() + event.pos() - self.last_pos)
+            # 计算新位置
+            new_pos = self.pos() + event.pos() - self.last_pos
+            self.move(new_pos)
+            # 阻止事件传递给子控件
+            event.accept()
 
     def mouseReleaseEvent(self, event):
+        # 确保所有状态下都能捕获鼠标释放事件
         if event.button() == Qt.MouseButton.LeftButton:
             self.is_pressing = False
+            # 阻止事件传递给子控件
+            event.accept()
+    
+    # 确保子控件的鼠标事件不会干扰主窗口拖动
+    def eventFilter(self, obj, event):
+        if obj == self.collapse_btn:
+            if event.type() == event.Type.MouseButtonPress:
+                # 直接调用主窗口的鼠标按下事件
+                self.mousePressEvent(event)
+                return True
+            elif event.type() == event.Type.MouseMove:
+                # 直接调用主窗口的鼠标移动事件
+                self.mouseMoveEvent(event)
+                return True
+            elif event.type() == event.Type.MouseButtonRelease:
+                # 先处理主窗口的鼠标释放事件
+                self.mouseReleaseEvent(event)
+                # 如果是点击（移动距离很小），则触发按钮的点击事件
+                if (event.pos() - self.last_pos).manhattanLength() < 5:
+                    self.toggle_collapse()
+                return True
+        return super().eventFilter(obj, event)
 
 # ===================== 系统托盘图标【✅修复无图标警告】 =====================
 def init_system_tray(app, main_win):
