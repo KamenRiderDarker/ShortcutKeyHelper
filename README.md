@@ -20,9 +20,14 @@ git clone https://github.com/your-username/shortcut-helper.git
 cd shortcut-helper
 ```
 
-### 2. 安装依赖
+### 2. 安装依赖或者进入venv环境
 ```bash
 pip install PyQt6
+
+venv\scripts\activate
+python main.py
+
+使用打包命令.txt中的内容
 ```
 
 ### 3. 运行程序
