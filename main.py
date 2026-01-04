@@ -1,18 +1,38 @@
 import sys
 import json
 import os
+import ctypes
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QDialog, QPushButton, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QMessageBox, QScrollArea, QMenu, QSystemTrayIcon, QListWidgetItem
 )
-from PyQt6.QtCore import Qt, QPoint, QSize
-from PyQt6.QtGui import QFont, QAction, QIcon, QPixmap
+from PyQt6.QtCore import Qt, QPoint, QSize, QEvent
+from PyQt6.QtGui import QFont, QAction, QIcon, QPixmap, QCursor
 
 # ===================== 全局配置 & 工具类 =====================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# 修复打包后路径问题
+if getattr(sys, 'frozen', False):
+    # 运行在打包后的环境中
+    if sys.platform.startswith('win'):
+        # Windows系统获取实际执行路径
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        buf = ctypes.create_unicode_buffer(1024)
+        kernel32.GetModuleFileNameW(None, buf, 1024)
+        BASE_DIR = os.path.dirname(buf.value)
+    else:
+        # 其他系统
+        BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
+else:
+    # 正常开发环境
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 DATA_DIR = os.path.join(BASE_DIR, "data")
+# 确保data目录存在
 if not os.path.exists(DATA_DIR):
-    os.makedirs(DATA_DIR)
+    try:
+        os.makedirs(DATA_DIR)
+    except Exception as e:
+        print(f"创建data目录失败: {e}")
 
 # 固定尺寸：宽100px，高200px，添加软件文字完全显示
 FLOAT_WIN_WIDTH = 100
@@ -44,7 +64,8 @@ class DataManager:
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(save_data, f, ensure_ascii=False, indent=2)
             return True
-        except:
+        except Exception as e:
+            print(f"保存数据失败: {e}")
             return False
 
     @staticmethod
@@ -242,10 +263,13 @@ class AddEditShortcutWindow(QDialog):
             return
         
         self.result = (soft_name, self.shortcut_temp)
-        DataManager.save_software(soft_name, self.shortcut_temp)
-        tip_text = f"{soft_name} 的快捷键已修改保存完成！" if self.edit_soft_name else f"{soft_name} 的快捷键已添加完成！"
-        QMessageBox.information(self, "操作成功", tip_text)
-        self.accept()
+        success = DataManager.save_software(soft_name, self.shortcut_temp)
+        if success:
+            tip_text = f"{soft_name} 的快捷键已修改保存完成！" if self.edit_soft_name else f"{soft_name} 的快捷键已添加完成！"
+            QMessageBox.information(self, "操作成功", tip_text)
+            self.accept()
+        else:
+            QMessageBox.warning(self, "保存失败", "无法保存快捷键数据，请检查权限或目录是否存在！")
 
 # ===================== 弹窗窗口-软件操作选择【编辑/查看/删除】 =====================
 class SoftwareOptionWindow(QDialog):
@@ -314,21 +338,32 @@ class ShortcutDetailWindow(QDialog):
         self.parent_win = parent
         self.is_pressing = False
         self.last_pos = QPoint(0,0)
+        self.resizing = False  # 是否正在调整大小
+        self.edge_size = 20  # 边缘检测区域大小，增大以提高可点击性
         self.init_ui()
+        # 安装事件过滤器以处理鼠标事件
+        self.installEventFilter(self)
 
     def init_ui(self):
+        # 获取屏幕高度并计算最大高度为屏幕高度的2/3
+        screen_geo = QApplication.primaryScreen().geometry()
+        self.max_height = int(screen_geo.height() * 2 / 3)
+        
         # 获取快捷键列表
         shortcut_list = DataManager.get_software_detail(self.soft_name)
         
-        # 计算窗口宽度
-        width = 250  # 加宽窗口以更好地展示列表
+        # 窗口宽度
+        width = 250
         
-        # 动态获取屏幕高度，设置最大高度为屏幕高度的80%
-        screen_height = QApplication.primaryScreen().geometry().height()
-        max_height = int(screen_height * 0.8)  # 最大高度为屏幕高度的80%
+        # 初始高度
+        init_height = min(400, max(150, len(shortcut_list) * 40 + 100))
+        # 确保初始高度不超过最大高度
+        init_height = min(init_height, self.max_height)
         
-        self.setMinimumSize(width, 100)
-        self.setMaximumSize(width, max_height)  # 设置最大高度，避免超过屏幕
+        self.setMinimumSize(width, 150)  # 设置最小尺寸
+        self.setMaximumSize(width, self.max_height)  # 设置最大尺寸为屏幕高度的2/3
+        self.resize(width, init_height)  # 设置初始尺寸
+        
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
@@ -447,44 +482,110 @@ class ShortcutDetailWindow(QDialog):
                 key_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
                 key_label.setStyleSheet("color:white;background:#334155;border-radius:5px;padding:5px 8px;")
                 content_layout.addWidget(key_label)
-        
-    # 鼠标拖动悬浮窗 - 确保在所有状态下都能正常工作
+    
+    # 鼠标事件处理 - 支持拖动和调整大小
     def mousePressEvent(self, event):
-        # 确保所有状态下都能捕获鼠标按下事件
+        # 检查是否在调整大小区域
+        rect = self.rect()
+        bottom_edge = rect.bottom() - self.edge_size
+        top_edge = rect.top() + self.edge_size
+        
         if event.button() == Qt.MouseButton.LeftButton:
+            # 检查是否在底部或顶部边缘
+            if event.pos().y() >= bottom_edge or event.pos().y() <= top_edge:
+                self.resizing = True
+                self.last_pos = event.pos()
+                self.setCursor(QCursor(Qt.CursorShape.SizeVerCursor))
+                event.accept()
+                return
+            
+            # 否则处理拖动
             self.is_pressing = True
             self.last_pos = event.pos()
-            # 阻止事件传递给子控件
             event.accept()
 
     def mouseMoveEvent(self, event):
-        # 确保所有状态下都能捕获鼠标移动事件
-        if self.is_pressing and event.buttons() == Qt.MouseButton.LeftButton:
-            # 计算新位置
+        if self.resizing:
+            # 调整窗口大小
+            delta = event.pos().y() - self.last_pos.y()
+            new_height = self.height() + delta
+            
+            # 确保高度在最小和最大范围内
+            if new_height >= self.minimumHeight() and new_height <= self.max_height:
+                self.resize(self.width(), new_height)
+                self.last_pos = event.pos()
+            event.accept()
+        elif self.is_pressing and event.buttons() == Qt.MouseButton.LeftButton:
+            # 窗口拖动
             new_pos = self.pos() + event.pos() - self.last_pos
             self.move(new_pos)
-            # 阻止事件传递给子控件
             event.accept()
 
     def mouseReleaseEvent(self, event):
-        # 确保所有状态下都能捕获鼠标释放事件
         if event.button() == Qt.MouseButton.LeftButton:
-            self.is_pressing = False
-            # 阻止事件传递给子控件
+            if self.resizing:
+                self.resizing = False
+                self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+            else:
+                self.is_pressing = False
             event.accept()
     
-    # 确保子控件的鼠标事件不会干扰主窗口拖动
+    # 重写event方法，优先处理鼠标事件
+    def event(self, event):
+        # 处理鼠标移动事件，用于边缘检测
+        if event.type() == QEvent.Type.MouseMove:
+            rect = self.rect()
+            bottom_edge = rect.bottom() - self.edge_size
+            top_edge = rect.top() + self.edge_size
+            
+            if self.resizing:
+                # 正在调整大小时，设置调整光标
+                self.setCursor(QCursor(Qt.CursorShape.SizeVerCursor))
+            else:
+                # 检查是否在边缘区域
+                if event.pos().y() >= bottom_edge or event.pos().y() <= top_edge:
+                    self.setCursor(QCursor(Qt.CursorShape.SizeVerCursor))
+                else:
+                    self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+        # 处理鼠标按下事件
+        elif event.type() == QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.LeftButton:
+                rect = self.rect()
+                bottom_edge = rect.bottom() - self.edge_size
+                top_edge = rect.top() + self.edge_size
+                
+                # 检查是否在底部或顶部边缘
+                if event.pos().y() >= bottom_edge or event.pos().y() <= top_edge:
+                    self.resizing = True
+                    self.last_pos = event.pos()
+                    self.setCursor(QCursor(Qt.CursorShape.SizeVerCursor))
+                    event.accept()
+                    return True
+        # 处理鼠标释放事件
+        elif event.type() == QEvent.Type.MouseButtonRelease:
+            if event.button() == Qt.MouseButton.LeftButton and self.resizing:
+                self.resizing = False
+                self.setCursor(QCursor(Qt.CursorShape.ArrowCursor))
+                event.accept()
+                return True
+        
+        # 其他事件交给父类处理
+        return super().event(event)
+    
+    # 事件过滤器 - 处理鼠标悬停时的光标变化
     def eventFilter(self, obj, event):
-        if obj == self.collapse_btn:
-            if event.type() == event.Type.MouseButtonPress:
-                self.mousePressEvent(event)
-                return True
-            elif event.type() == event.Type.MouseMove:
-                self.mouseMoveEvent(event)
-                return True
-            elif event.type() == event.Type.MouseButtonRelease:
-                self.mouseReleaseEvent(event)
-                return True
+        # 确保鼠标移动事件被正确处理
+        if event.type() == QEvent.Type.MouseMove:
+            rect = self.rect()
+            bottom_edge = rect.bottom() - self.edge_size
+            top_edge = rect.top() + self.edge_size
+            
+            if not self.resizing:
+                # 检查是否在边缘区域
+                if event.pos().y() >= bottom_edge or event.pos().y() <= top_edge:
+                    self.setCursor(QCursor(Qt.CursorShape.SizeVerCursor))
+                    # 阻止事件继续传递，确保光标正确显示
+                    return True
         return super().eventFilter(obj, event)
 
 # ===================== 核心：悬浮球主窗口【✅修复列表删空闪退BUG 核心修改】 =====================
